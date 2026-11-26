@@ -21,7 +21,7 @@ func TestDefaults(t *testing.T) {
 	want := Config{
 		OutputDir: "/run/drivetemp-sensor", Sensors: []string{"hdd-max", "ssd-max"},
 		Interval: 10 * time.Second, ReadTimeout: 5 * time.Second, StaleAfter: 60 * time.Second,
-		FailsafeTempC: 100, Standby: "read", StandbyTempC: 30, MinHDD: 1, MinSSD: 1,
+		FailsafeTempC: 100, HDDFailsafeTempC: 100, SSDFailsafeTempC: 100, Standby: "read", StandbyTempC: 30, MinHDD: 1, MinSSD: 1,
 		OnExit: "failsafe", SysfsRoot: "/sys", LogLevel: slog.LevelInfo, logLevelString: "info",
 	}
 	if !reflect.DeepEqual(*c, want) {
@@ -62,6 +62,42 @@ func TestEnvAndFlags(t *testing.T) {
 	}
 }
 
+func TestPerSensorFailsafe(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		env      map[string]string
+		hdd, ssd int
+	}{
+		{name: "inherit default", hdd: 100, ssd: 100},
+		{name: "inherit global flag", args: []string{"--failsafe-temp", "80"}, hdd: 80, ssd: 80},
+		{name: "inherit global env", env: map[string]string{"DRIVETEMP_SENSOR_FAILSAFE_TEMP": "75"}, hdd: 75, ssd: 75},
+		{name: "hdd flag only", args: []string{"--failsafe-temp", "80", "--hdd-failsafe-temp", "55"}, hdd: 55, ssd: 80},
+		{name: "both from env", env: map[string]string{
+			"DRIVETEMP_SENSOR_HDD_FAILSAFE_TEMP": "55",
+			"DRIVETEMP_SENSOR_SSD_FAILSAFE_TEMP": "70",
+		}, hdd: 55, ssd: 70},
+		{name: "flag overrides env", args: []string{"--ssd-failsafe-temp", "65"},
+			env: map[string]string{"DRIVETEMP_SENSOR_SSD_FAILSAFE_TEMP": "70"}, hdd: 100, ssd: 65},
+		{name: "explicit zero is kept", args: []string{"--hdd-failsafe-temp", "0"}, hdd: 0, ssd: 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := Parse("t", tt.args, envFrom(tt.env), io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.FailsafeMCFor(SensorHDDMax) != tt.hdd*1000 || c.FailsafeMCFor(SensorSSDMax) != tt.ssd*1000 {
+				t.Errorf("failsafe hdd=%d ssd=%d, want %d %d",
+					c.FailsafeMCFor(SensorHDDMax), c.FailsafeMCFor(SensorSSDMax), tt.hdd*1000, tt.ssd*1000)
+			}
+			if got := c.FailsafeTempsC(); got[SensorHDDMax] != tt.hdd || got[SensorSSDMax] != tt.ssd {
+				t.Errorf("FailsafeTempsC = %v", got)
+			}
+		})
+	}
+}
+
 func TestEnvName(t *testing.T) {
 	if got := EnvName("read-timeout"); got != "DRIVETEMP_SENSOR_READ_TIMEOUT" {
 		t.Errorf("EnvName = %s", got)
@@ -81,6 +117,8 @@ func TestInvalid(t *testing.T) {
 		{args: []string{"--read-timeout", "20s"}, want: "--read-timeout"},
 		{args: []string{"--stale-after", "-1s"}, want: "--stale-after"},
 		{args: []string{"--failsafe-temp", "200"}, want: "--failsafe-temp"},
+		{args: []string{"--hdd-failsafe-temp", "151"}, want: "--hdd-failsafe-temp"},
+		{env: map[string]string{"DRIVETEMP_SENSOR_SSD_FAILSAFE_TEMP": "-1"}, want: "--ssd-failsafe-temp"},
 		{args: []string{"--standby-temp", "-5"}, want: "--standby-temp"},
 		{args: []string{"--standby", "sometimes"}, want: "--standby"},
 		{args: []string{"--on-exit", "explode"}, want: "--on-exit"},

@@ -31,26 +31,50 @@ var AllSensors = []string{SensorHDDMax, SensorSSDMax}
 
 // Config is the parsed configuration.
 type Config struct {
-	OutputDir      string
-	Sensors        []string
-	Interval       time.Duration
-	ReadTimeout    time.Duration
-	StaleAfter     time.Duration
-	FailsafeTempC  int
-	Standby        string
-	StandbyTempC   int
-	MinHDD         int
-	MinSSD         int
-	Exclude        []string
-	OnExit         string
-	StatusFile     string
-	SysfsRoot      string
-	LogLevel       slog.Level
-	logLevelString string
+	OutputDir     string
+	Sensors       []string
+	Interval      time.Duration
+	ReadTimeout   time.Duration
+	StaleAfter    time.Duration
+	FailsafeTempC int
+	// HDDFailsafeTempC and SSDFailsafeTempC are the per-sensor failsafe
+	// values, resolved: they equal FailsafeTempC unless set explicitly.
+	HDDFailsafeTempC int
+	SSDFailsafeTempC int
+	Standby          string
+	StandbyTempC     int
+	MinHDD           int
+	MinSSD           int
+	Exclude          []string
+	OnExit           string
+	StatusFile       string
+	SysfsRoot        string
+	LogLevel         slog.Level
+	logLevelString   string
 }
 
 // FailsafeMC returns the failsafe temperature in millidegrees.
 func (c Config) FailsafeMC() int { return c.FailsafeTempC * 1000 }
+
+// FailsafeMCFor returns the failsafe temperature of a sensor in millidegrees.
+func (c Config) FailsafeMCFor(sensor string) int {
+	switch sensor {
+	case SensorHDDMax:
+		return c.HDDFailsafeTempC * 1000
+	case SensorSSDMax:
+		return c.SSDFailsafeTempC * 1000
+	}
+	return c.FailsafeMC()
+}
+
+// FailsafeTempsC returns the failsafe temperature (°C) of every enabled sensor.
+func (c Config) FailsafeTempsC() map[string]int {
+	m := map[string]int{}
+	for _, s := range c.Sensors {
+		m[s] = c.FailsafeMCFor(s) / 1000
+	}
+	return m
+}
 
 // StandbyMC returns the standby temperature in millidegrees.
 func (c Config) StandbyMC() int { return c.StandbyTempC * 1000 }
@@ -97,6 +121,8 @@ func Parse(name string, args []string, getenv func(string) string, out io.Writer
 	fs.DurationVar(&c.ReadTimeout, "read-timeout", 5*time.Second, "how long to wait for a drive read before it counts as pending")
 	fs.DurationVar(&c.StaleAfter, "stale-after", 60*time.Second, "how long a drive's last good reading stands in for a failed or pending read")
 	fs.IntVar(&c.FailsafeTempC, "failsafe-temp", 100, "value (°C) written when the temperature is unknown")
+	fs.IntVar(&c.HDDFailsafeTempC, "hdd-failsafe-temp", 0, "failsafe value (°C) for hdd-max (default: --failsafe-temp)")
+	fs.IntVar(&c.SSDFailsafeTempC, "ssd-failsafe-temp", 0, "failsafe value (°C) for ssd-max (default: --failsafe-temp)")
 	fs.StringVar(&c.Standby, "standby", "read", "standby handling: read (read every drive) or skip (do not read drives in standby; experimental)")
 	fs.IntVar(&c.StandbyTempC, "standby-temp", 30, "value (°C) written when all drives of a class are asleep (--standby=skip)")
 	fs.IntVar(&c.MinHDD, "min-hdd", 1, "fail safe when fewer HDDs are found")
@@ -140,6 +166,15 @@ func Parse(name string, args []string, getenv func(string) string, out io.Writer
 		return nil, fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
 
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if !set["hdd-failsafe-temp"] {
+		c.HDDFailsafeTempC = c.FailsafeTempC
+	}
+	if !set["ssd-failsafe-temp"] {
+		c.SSDFailsafeTempC = c.FailsafeTempC
+	}
+
 	for _, s := range strings.Split(sensors, ",") {
 		if s = strings.TrimSpace(s); s != "" {
 			c.Sensors = append(c.Sensors, s)
@@ -177,6 +212,12 @@ func (c *Config) validate() error {
 	}
 	if c.FailsafeTempC < 0 || c.FailsafeTempC > 150 {
 		errs = append(errs, errors.New("--failsafe-temp must be between 0 and 150 °C"))
+	}
+	if c.HDDFailsafeTempC < 0 || c.HDDFailsafeTempC > 150 {
+		errs = append(errs, errors.New("--hdd-failsafe-temp must be between 0 and 150 °C"))
+	}
+	if c.SSDFailsafeTempC < 0 || c.SSDFailsafeTempC > 150 {
+		errs = append(errs, errors.New("--ssd-failsafe-temp must be between 0 and 150 °C"))
 	}
 	if c.StandbyTempC < 0 || c.StandbyTempC > 150 {
 		errs = append(errs, errors.New("--standby-temp must be between 0 and 150 °C"))

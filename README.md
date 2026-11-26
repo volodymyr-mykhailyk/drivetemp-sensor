@@ -55,12 +55,26 @@ Each cycle, per sensor:
 | Discovery fails, or the file cannot be written, or any other internal error | Failsafe |
 
 - The failsafe value is `--failsafe-temp`, default **100 °C** (`100000`): inside CoolerControl's
-  valid range (0–120 °C) and at the top of any sane fan curve.
+  valid range (0–120 °C) and at the top of any sane fan curve. Each sensor can have its own value
+  with `--hdd-failsafe-temp` and `--ssd-failsafe-temp`; each defaults to `--failsafe-temp`.
+  See [Choosing a failsafe value](#choosing-a-failsafe-value).
 - A read that has not returned within `--read-timeout` (default 5 s) is *pending*, not failed —
   `drivetemp` can block for many seconds while a drive spins up. No second read of that drive is
   started while one is pending.
 - Readings outside 1–150 °C are firmware placeholders, not measurements, and count as failed reads.
 - Excluded drives (`--exclude`) do not count towards `--min-hdd` / `--min-ssd`.
+
+### Choosing a failsafe value
+
+100 °C puts any fan curve at its maximum, which is safe and loud. If the machine sits somewhere
+noise matters, set each sensor's failsafe to **its drives' temperature limit** instead — for example
+55 °C for HDDs, 70 °C for SATA SSDs — and shape the fan curve so it already gives a high duty at
+that temperature (say 80–90 %). A failure then means "cool hard", not "full blast".
+
+Don't go below the limit. While a sensor is in failsafe it reports a temperature it did not measure;
+if the drive whose reading was lost is actually hotter than the failsafe value, the fan will
+under-cool it. Pair a lower failsafe with an alert at or below that value in your fan controller,
+so a failsafe never goes unnoticed.
 
 ### Lifecycle
 
@@ -109,13 +123,16 @@ Share a tmpfs-backed volume between drivetemp-sensor and the fan controller:
 ```yaml
 services:
   drivetemp-sensor:
-    image: ghcr.io/volodymyr-mykhailyk/drivetemp-sensor:0.1
+    image: ghcr.io/volodymyr-mykhailyk/drivetemp-sensor:0.2
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     environment:
       DRIVETEMP_SENSOR_INTERVAL: 10s
+      # Failsafe at the drives' limit instead of 100 °C; see "Choosing a failsafe value".
+      # DRIVETEMP_SENSOR_HDD_FAILSAFE_TEMP: 55
+      # DRIVETEMP_SENSOR_SSD_FAILSAFE_TEMP: 70
       # DRIVETEMP_SENSOR_EXCLUDE: "Elements*,naa.5000c500deadbeef"
       # DRIVETEMP_SENSOR_SENSORS: hdd-max
     volumes:
@@ -160,7 +177,7 @@ This needs access to the block devices and `CAP_SYS_RAWIO`:
 ```yaml
 services:
   drivetemp-sensor:
-    image: ghcr.io/volodymyr-mykhailyk/drivetemp-sensor:0.1
+    image: ghcr.io/volodymyr-mykhailyk/drivetemp-sensor:0.2
     user: "0:0"
     cap_add: [SYS_RAWIO]
     devices:
@@ -192,6 +209,8 @@ combined.
 | `--read-timeout` | `5s` | Wait for a read before it counts as pending (≤ interval) |
 | `--stale-after` | `60s` | How long a last good reading stands in for a failed/pending read |
 | `--failsafe-temp` | `100` | °C written when the temperature is unknown |
+| `--hdd-failsafe-temp` | `--failsafe-temp` | Failsafe °C for `hdd-max` |
+| `--ssd-failsafe-temp` | `--failsafe-temp` | Failsafe °C for `ssd-max` |
 | `--standby` | `read` | `read` every drive, or `skip` drives in standby (experimental) |
 | `--standby-temp` | `30` | °C written when all drives of a class are asleep (`skip` only) |
 | `--min-hdd`, `--min-ssd` | `1` | Fail safe when fewer drives of the class are found |
@@ -227,7 +246,11 @@ for d in /sys/block/sd*; do echo "$d $(cat $d/device/model) $(cat $d/device/wwid
 3. Use the custom sensor as the temperature source of the drive fan's profile (graph/curve).
 
 CoolerControl reads the file as millidegrees and accepts 0–120 °C. If the file becomes unreadable,
-CoolerControl keeps the last value for a few polls and then assumes 100 °C.
+CoolerControl keeps the last value for a few polls and then assumes 100 °C — regardless of the
+failsafe value you set here.
+
+With a failsafe below 100 °C, add a CoolerControl alert on the custom sensor at or below the
+failsafe value, so a failsafe shows up in its alert log.
 
 ### fan2go
 
@@ -275,8 +298,9 @@ fans = drive_fan
 temps = hdd_max
 ```
 
-The failsafe value (100 °C) is above `panic`, so afancontrol runs all fans at full speed while
-drivetemp-sensor does not know the temperature.
+With the default failsafe (100 °C) the value is above `panic`, so afancontrol runs all fans at full
+speed while drivetemp-sensor does not know the temperature. Keep the failsafe at or above `panic`
+if you want that behaviour.
 
 ## Development
 

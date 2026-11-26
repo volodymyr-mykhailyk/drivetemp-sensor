@@ -99,7 +99,7 @@ func (d *Daemon) Start() error {
 		return fmt.Errorf("write startup failsafe: %w", err)
 	}
 	d.log.Info("started", "output_dir", d.cfg.OutputDir, "sensors", d.cfg.Sensors,
-		"interval", d.cfg.Interval, "standby", d.cfg.Standby, "failsafe_temp", d.cfg.FailsafeTempC)
+		"interval", d.cfg.Interval, "standby", d.cfg.Standby, "failsafe_temp", d.cfg.FailsafeTempsC())
 	return nil
 }
 
@@ -114,25 +114,25 @@ func (d *Daemon) Shutdown() error {
 		d.log.Error("stopping, could not write failsafe value", "err", err)
 		return err
 	}
-	d.log.Info("stopping, wrote failsafe value", "value_mc", d.cfg.FailsafeMC())
+	d.log.Info("stopping, wrote failsafe value", "failsafe_temp", d.cfg.FailsafeTempsC())
 	return nil
 }
 
 func (d *Daemon) writeFailsafe() error {
 	var errs []error
 	for _, s := range d.cfg.Sensors {
-		if err := output.WriteSensor(d.cfg.OutputDir, s, d.cfg.FailsafeMC()); err != nil {
+		if err := output.WriteSensor(d.cfg.OutputDir, s, d.cfg.FailsafeMCFor(s)); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", s, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (d *Daemon) params(minDrives int) aggregate.Params {
+func (d *Daemon) params(sensor string, minDrives int) aggregate.Params {
 	return aggregate.Params{
 		Now:        d.now(),
 		StaleAfter: d.cfg.StaleAfter,
-		FailsafeMC: d.cfg.FailsafeMC(),
+		FailsafeMC: d.cfg.FailsafeMCFor(sensor),
 		StandbyMC:  d.cfg.StandbyMC(),
 		MinDrives:  minDrives,
 	}
@@ -161,7 +161,7 @@ func (d *Daemon) Cycle(ctx context.Context) (results map[string]aggregate.Result
 			d.log.Error("internal error, writing failsafe", "panic", r)
 			results = map[string]aggregate.Result{}
 			for _, s := range d.cfg.Sensors {
-				results[s] = aggregate.Failsafe(d.params(0), fmt.Sprintf("internal error: %v", r))
+				results[s] = aggregate.Failsafe(d.params(s, 0), fmt.Sprintf("internal error: %v", r))
 			}
 			if err := d.writeFailsafe(); err != nil {
 				d.log.Error("could not write failsafe value", "err", err)
@@ -174,7 +174,7 @@ func (d *Daemon) Cycle(ctx context.Context) (results map[string]aggregate.Result
 	drives, err := discovery.Discover(discovery.Options{SysfsRoot: d.cfg.SysfsRoot, Exclude: d.cfg.Exclude})
 	if err != nil {
 		for _, s := range d.cfg.Sensors {
-			results[s] = aggregate.Failsafe(d.params(0), "discovery failed: "+err.Error())
+			results[s] = aggregate.Failsafe(d.params(s, 0), "discovery failed: "+err.Error())
 		}
 		d.writeResults(results)
 		d.trackModes(results)
@@ -208,7 +208,7 @@ func (d *Daemon) Cycle(ctx context.Context) (results map[string]aggregate.Result
 
 	for _, s := range d.cfg.Sensors {
 		c := sensorClass(s)
-		results[s] = aggregate.Max(byClass[c], d.params(d.minFor(c)))
+		results[s] = aggregate.Max(byClass[c], d.params(s, d.minFor(c)))
 	}
 	d.writeResults(results)
 	d.trackModes(results)
@@ -242,8 +242,8 @@ func (d *Daemon) writeResults(results map[string]aggregate.Result) {
 			continue
 		}
 		d.log.Error("could not write sensor, trying failsafe", "sensor", s, "err", err)
-		results[s] = aggregate.Failsafe(d.params(0), "write failed: "+err.Error())
-		if err := output.WriteSensor(d.cfg.OutputDir, s, d.cfg.FailsafeMC()); err != nil {
+		results[s] = aggregate.Failsafe(d.params(s, 0), "write failed: "+err.Error())
+		if err := output.WriteSensor(d.cfg.OutputDir, s, d.cfg.FailsafeMCFor(s)); err != nil {
 			d.log.Error("could not write failsafe value", "sensor", s, "err", err)
 		}
 	}
@@ -358,10 +358,11 @@ type DriveStatus struct {
 
 // SensorStatus is one sensor in Status.
 type SensorStatus struct {
-	Name    string `json:"name"`
-	ValueMC int    `json:"value_mc"`
-	Mode    string `json:"mode"`
-	Reason  string `json:"reason"`
+	Name       string `json:"name"`
+	ValueMC    int    `json:"value_mc"`
+	Mode       string `json:"mode"`
+	Reason     string `json:"reason"`
+	FailsafeMC int    `json:"failsafe_mc"`
 }
 
 func (d *Daemon) writeStatus(drives []discovery.Drive, reads map[string]reader.Result, results map[string]aggregate.Result) {
@@ -388,7 +389,8 @@ func (d *Daemon) writeStatus(drives []discovery.Drive, reads map[string]reader.R
 	sort.Strings(names)
 	for _, s := range names {
 		r := results[s]
-		st.Sensors = append(st.Sensors, SensorStatus{Name: s, ValueMC: r.ValueMC, Mode: string(r.Mode), Reason: r.Reason})
+		st.Sensors = append(st.Sensors, SensorStatus{Name: s, ValueMC: r.ValueMC, Mode: string(r.Mode), Reason: r.Reason,
+			FailsafeMC: d.cfg.FailsafeMCFor(s)})
 	}
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {

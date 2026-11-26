@@ -455,3 +455,79 @@ func TestLogsOncePerStateChange(t *testing.T) {
 		t.Errorf("sensor info logged %d times, want 2:\n%s", n, logs)
 	}
 }
+
+// perSensorEnv sets different failsafe values for the two sensors.
+func perSensorEnv(t *testing.T, args ...string) *env {
+	return newEnv(t, append([]string{"--exclude", "Elements*", "--hdd-failsafe-temp", "55", "--ssd-failsafe-temp", "70"}, args...)...)
+}
+
+func TestPerSensorFailsafeOnStartAndShutdown(t *testing.T) {
+	e := perSensorEnv(t)
+	d := e.daemon(nil)
+	if err := d.Start(); err != nil {
+		t.Fatal(err)
+	}
+	e.expect(nil, "hdd-max", "55000\n", "")
+	e.expect(nil, "ssd-max", "70000\n", "")
+	if !strings.Contains(e.logs.String(), `failsafe_temp="map[hdd-max:55 ssd-max:70]"`) {
+		t.Errorf("start log does not show per-sensor failsafe:\n%s", e.logs.String())
+	}
+	res := d.Cycle(context.Background())
+	e.expect(res, "hdd-max", "41000\n", aggregate.ModeNormal)
+	e.expect(res, "ssd-max", "35000\n", aggregate.ModeNormal)
+	if err := d.Shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	e.expect(nil, "hdd-max", "55000\n", "")
+	e.expect(nil, "ssd-max", "70000\n", "")
+}
+
+func TestPerSensorFailsafeInCycle(t *testing.T) {
+	t.Run("read failure", func(t *testing.T) {
+		e := perSensorEnv(t)
+		res := e.daemon(func(discovery.Drive) reader.Result { return reader.Result{State: reader.Failed} }).Cycle(context.Background())
+		e.expect(res, "hdd-max", "55000\n", aggregate.ModeFailsafe)
+		e.expect(res, "ssd-max", "70000\n", aggregate.ModeFailsafe)
+	})
+	t.Run("too few drives", func(t *testing.T) {
+		e := perSensorEnv(t, "--min-hdd", "5")
+		res := e.daemon(nil).Cycle(context.Background())
+		e.expect(res, "hdd-max", "55000\n", aggregate.ModeFailsafe)
+		e.expect(res, "ssd-max", "35000\n", aggregate.ModeNormal)
+	})
+	t.Run("discovery failure", func(t *testing.T) {
+		e := perSensorEnv(t)
+		if err := os.RemoveAll(filepath.Join(e.sys, "block")); err != nil {
+			t.Fatal(err)
+		}
+		res := e.daemon(nil).Cycle(context.Background())
+		e.expect(res, "hdd-max", "55000\n", aggregate.ModeFailsafe)
+		e.expect(res, "ssd-max", "70000\n", aggregate.ModeFailsafe)
+	})
+	t.Run("internal error", func(t *testing.T) {
+		e := perSensorEnv(t)
+		res := e.daemon(func(discovery.Drive) reader.Result { panic("boom") }).Cycle(context.Background())
+		e.expect(res, "hdd-max", "55000\n", aggregate.ModeFailsafe)
+		e.expect(res, "ssd-max", "70000\n", aggregate.ModeFailsafe)
+	})
+}
+
+func TestStatusFileShowsFailsafe(t *testing.T) {
+	e := perSensorEnv(t, "--status-file", filepath.Join(t.TempDir(), "status.json"))
+	e.daemon(nil).Cycle(context.Background())
+	b, err := os.ReadFile(e.cfg.StatusFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st Status
+	if err := json.Unmarshal(b, &st); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, s := range st.Sensors {
+		got[s.Name] = s.FailsafeMC
+	}
+	if got["hdd-max"] != 55000 || got["ssd-max"] != 70000 {
+		t.Errorf("failsafe in status = %v", got)
+	}
+}
